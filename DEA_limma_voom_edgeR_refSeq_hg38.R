@@ -1,0 +1,1352 @@
+rm(list=ls())
+library("GenomicFeatures")
+library("heatmap.plus")
+library("MASS")
+library(DESeq)
+library(edgeR)
+library(biomaRt)
+library (Biobase)
+library(marray)
+library (limma)
+library (affy)
+library(simpleaffy)
+library(affyPLM)
+library(RColorBrewer)
+library(gcrma)  
+library(gplots)
+library(annaffy)
+library(plyr)
+library(ggplot2)
+library(heatmap.plus)
+rawCounts <- read.table("../rawData/metaReadCount_hg38_refSeq.xls",row.name=1, header=TRUE, fill=TRUE)
+rawCounts<-rawCounts[,order(colnames(rawCounts))]
+colnames(rawCounts)<-gsub("_1",'',colnames(rawCounts))
+tail(rawCounts)
+if(rownames(tail(rawCounts,1))=="__alignment_not_unique"){
+  # remove 5 lines from tail
+  rawCounts<-rawCounts[1:(dim(rawCounts)[1]-5),]
+}
+tail(rawCounts)
+
+# create target.csv files
+#conds<-read.delim('../../target.csv',header=T)
+target<-read.delim("./sample.txt",sep=' ',header=T)
+
+conds<-data.frame(matrix(NA, nrow = 15, ncol = 4))
+colnames(conds)<-colnames(target)
+conds$sample=factor(target$sample)
+conds$subject=factor(target$subject)
+conds$condition=factor(target$condition)
+conds$treatment=factor(target$treatment)
+conds$group<-factor(paste(conds$condition,"_",conds$treatment,sep=''))
+rownames(conds)<-conds$sample
+rawCounts<-rawCounts[,conds$sample]
+write.csv(conds,"target.csv")
+
+
+conds
+temp<-rawCounts
+temp$flag<-0
+for (i in 1:ncol(rawCounts)){
+  temp$flag<-temp$flag+(temp[,i]>=5)
+}
+table(temp$flag>=4) #22208 clusters
+rawCounts<-rawCounts[temp$flag>=3,]
+
+conds
+#############################################
+genes <- read.csv("./Hg38_RefSeq_annot.csv", header=TRUE, row.names=1)
+head(genes)
+
+table(rownames(genes)%in%rownames(rawCounts))
+tmp<-data.frame(gene=rownames(rawCounts))
+genes$gene<-rownames(genes)
+genes<-merge(genes,tmp,by="gene",all.y=TRUE)
+rownames(genes)<-genes$gene
+table(rownames(genes)%in%rownames(rawCounts))
+
+################################################
+col_default <- c("green","blue","red","brown4 ","black ","brown ","cyan ","darkgreen ","darkgrey ","darkmagenta ","darkolivegreen ","darkorange ","darkred ","darkslateblue ","darkturquoise ","floralwhite ","green ","greenyellow ","grey ","lightcyan ","lightcyan1 ","lightgreen ","lightsteelblue1 ","lightyellow ","magenta ","mediumpurple3 ","midnightblue ","orange ","paleturquoise ","pink ","plum1 ","plum2 ","royalblue ","saddlebrown ","salmon ","sienna3 ","skyblue ","skyblue3 ","steelblue ","tan ","thistle1 ","thistle2 ","turquoise ","violet ","white ","yellowgreen","grey60 ","orangered4 ","bisque4 ","darkorange2 ","ivory ")
+
+cv <- as.matrix(conds)
+dim(cv) <- c(1,prod(dim(cv)))
+rownames(table(cv))
+names <- rownames(table(cv))
+col <- rainbow(length(names))
+names(col)<- names
+clab <- matrix(col[as.matrix(conds)],nrow=nrow(conds),ncol=ncol(conds))
+colnames(clab) <- colnames(conds) 
+rownames(clab)<-rownames(conds)
+a=1
+for (i in unique(clab[,2])){
+  clab[which(clab[,2]==i),2]=col_default[a]
+  a=a+1
+}
+b=1
+for (i in unique(clab[,1])){
+  clab[which(clab[,1]==i),1]=col_default[b]
+  b=b+1
+}
+clab
+##################################################################
+x<-rawCounts
+nf = calcNormFactors(rawCounts, method = "TMM")
+group <- conds$group
+group<-factor(group) #group as a factor
+names(group) <- rownames(conds)
+rep<-factor(conds$subject)
+names(rep)<- rownames(conds)
+design<-cbind(model.matrix(~0+group),model.matrix(~0+rep))
+colnames(design)<-gsub("group","",colnames(design))
+colnames(design)<-gsub("rep","",colnames(design))
+
+design<-design[,c(-9,-11)]
+
+pdf("00_Voom_mean-var_trend.pdf",height=8,width=10)
+voom.data = voom(x, design =design, lib.size = colSums(x) * nf,plot=TRUE)
+dev.off()
+voom.data = voom(x, design =design, lib.size = colSums(x) * nf)
+voom.data$genes = rownames(x)
+voom.fitlimma = lmFit(voom.data, design = design)
+voom.fitbayes = eBayes(voom.fitlimma)
+voom.pvalues = voom.fitbayes$p.value[, 2]
+voom.adjpvalues = p.adjust(voom.pvalues, method = "BH")
+##################################################################
+my.contrasts<-makeContrasts("WT_ValproicAcid_vs_WT_Control"=WT_ValproicAcid - WT_Control,
+                            "WT_SAHA_vs_WT_Control"=WT_SAHA - WT_Control,
+                            "IDH1m_ValproicAcid_vs_IDH1m_Control"=IDH1m_ValproicAcid - IDH1m_Control,
+                            "IDH1m_SAHA_vs_IDH1m_Control"=IDH1m_SAHA - IDH1m_Control,
+                            levels=design)
+
+
+my.contrasts
+
+fit2.anova<- contrasts.fit(voom.fitlimma, my.contrasts) 
+fitb<- eBayes(fit2.anova) 
+
+#selecting the statistical cutoff
+decide <- matrix(c("fdr",0.01, "fdr",0.05,"fdr",0.1,"none",0.01,"none",0.05, "none", 0.1),nrow=6,ncol=2,byr=T)
+
+# initialize:
+mysum <- as.list(1:nrow(decide))
+mynum <- 0
+maxmax <- 0
+
+for (test in 1:nrow(decide)){
+  results<-decideTests(fitb, adjust.method=decide[test,1],p=as.numeric(decide[test,2]))
+  
+  summary(results) -> mysum[[test]]
+  mynum[test] <-length(which(apply(results,1,function(x)any(x,na.rm=T))))
+  maxmax <- max(c(maxmax, as.vector(mysum[[test]][c(1,3),])))
+}
+
+pdf("0_threshold_selection_updated_limma_voom.pdf", width=12,height=12)
+
+par(mfrow=c(2,3))
+for (test in 1:nrow(decide))
+{
+  as.numeric(as.vector(mysum[[test]][3,]))->plotMe1
+  as.numeric(as.vector(mysum[[test]][1,]))->plotMe2
+  maxData = max(plotMe1)
+  maxData2 = max(plotMe2)
+  
+  barplot(plotMe1,horiz=T,col="red",xlim=c(-maxmax,maxmax),
+          main=paste("Gene Changes \np<",decide[test,2], ", " , decide[test,1],
+                     " (" ,mynum[test] ,")",sep=""))->yy
+  barplot(-plotMe2,horiz=T,col="green",add=T)->yy
+  
+  xx<-vector("integer",ncol(mysum[[test]]))
+  text(xx,yy,gsub("^X","",colnames(mysum[[test]])))
+  text( 0.9*maxmax,yy+0.1,format(plotMe1,digits=3))
+  text( - 0.9*maxmax,yy+0.1,format(plotMe2,digits=3))
+}
+dev.off()
+
+#########################################################################
+mm10gtf<-read.table("./GRCh_38_refSeq_refLat.gtf",sep="\t")
+temp<-mm10gtf[,c(3,4,5,9)]
+colnames(temp)<-c("type","start","end","gene")
+temp<-temp[temp$type=="exon",]
+## remove duplicates
+temp1<-temp[-(grep("_dup",temp[,4])),]
+
+temp1$gene<-gsub("gene_id ","",temp1$gene)
+temp1$gene<-gsub(";.*","",temp1$gene)
+temp1$exon_length<-temp1$end-temp1$start+1
+temp2<-temp1[,c(4,2,3,5)]
+geneLen<-ddply(temp2,.(gene),function(x)(sum(x[,4])))
+colnames(geneLen)[2]<-"transcript_length"
+
+millionsMapped <- apply(x,2,sum) / 1000000
+rpm<-sweep(x,2,millionsMapped,"/")
+rpm$gene<-rownames(rpm)
+temp3<-merge(rpm,geneLen,by="gene")
+rownames(temp3)<-temp3$gene
+fpkm<-temp3[,2:(dim(temp3)[2]-1)]/temp3$transcript_length*1000
+colnames(fpkm)<-paste("fpkm",colnames(fpkm),sep="_")
+avg_fpkm<-data.frame(avg_fpkm=apply(fpkm[,1:(dim(fpkm)[2]-1)],1,mean),temp=NA)
+
+log.fpkm<-log10(fpkm)
+dfpkm<-stack(log.fpkm)
+colnames(dfpkm)[2]="sample"
+pdf("log_fpkm_density_plot.pdf",height=10,width=8)
+ggplot(dfpkm, aes(x = values)) +stat_density(aes(group = sample, color = sample),position="identity",geom="line")+xlim(-5,5)
+dev.off()
+#########################################################################
+Voom.logFC<-fit2.anova$coefficients
+colnames(Voom.logFC)<-paste("logFC_",colnames(Voom.logFC),sep="")
+Voom.pvalues<-fitb$p.value
+colnames(Voom.pvalues)<-paste("pVal_",colnames(Voom.pvalues),sep="")
+Voom.adjpvalues<-Voom.pvalues
+for (i in 1:dim(my.contrasts)[2]){
+  Voom.adjpvalues[,i]<-p.adjust(Voom.pvalues[,i],method="BH")
+}
+colnames(Voom.adjpvalues)<-paste("FDR_",colnames(Voom.adjpvalues),sep="")
+Rank <- rank(rowSums(-voom.data$E), ties.method="first")
+voom.data$E.count<-2^voom.data$E
+colnames(voom.data$E.count)<-paste(colnames(voom.data$E.count),"_voom_count",sep="")
+Voom.count<-x
+colnames(Voom.count)<-paste(colnames(Voom.count),"_raw_count",sep="")
+Annot <- genes[rownames(x),]
+fpkm<-fpkm[rownames(Annot),]
+avg_fpkm<-avg_fpkm[rownames(Annot),]
+Complete<-as.data.frame( cbind(Annot,Rank,avg_fpkm[,1],Voom.logFC,Voom.pvalues,Voom.adjpvalues,fpkm,voom.data$E.count,Voom.count))
+head(Complete)
+tail(Complete)
+cpComp1<-Complete
+write.csv(Complete, file= "Complete_geneList_voom_limma.csv")
+#############################################
+pdf("RefSeq_MDSplot_voomTMM_filtered.pdf", width=10,height=10)
+sizeText=0.8
+data <- voom.data$E
+ldat <- dist(t(data))
+fit <- isoMDS(ldat, k=2)
+x <- fit$points[,1]
+y <- fit$points[,2]
+plot(x, y, xlab="Coordinate 1", ylab="Coordinate 2", main="VSD normalized All Samples MDS", type="n",cex=1,col=clab[,2],xlim=c(min(x)*1.4,max(x)*1.4))
+text(x, y, labels = row.names(t(data)), cex=sizeText, col=clab[,2])
+legend("topright", legend=unique(conds$group), fill=unique(clab[,2]),cex=sizeText)
+dev.off()
+#############################################
+#################################
+#  save the output of sig Genes #
+#################################
+padj<-0.05
+mFDR<-apply(Voom.adjpvalues,1,min)
+length(mFDR)
+anyDEG <- names(mFDR[which(mFDR < padj)])
+length(anyDEG)
+SigGene <- Complete[anyDEG,]
+head(SigGene)
+tail(SigGene)
+dim(SigGene)
+SigGene <- SigGene[order(SigGene$Rank),]
+write.csv(SigGene, file= paste("Significant_geneList_voom_limma_FDR",padj,".csv",sep=""))
+################Yue pvalue
+# padj<-0.01
+# mFDR<-apply(Voom.pvalues,1,min)
+# length(mFDR)
+# anyDEG <- names(mFDR[which(mFDR < padj)])
+# length(anyDEG)
+# SigGene <- Complete[anyDEG,]
+# head(SigGene)
+# tail(SigGene)
+# dim(SigGene)
+# SigGene <- SigGene[order(SigGene$Rank),]
+
+## 259
+write.csv(SigGene, file= paste("Significant_geneList_voom_limma_FDR0.1",padj,".csv",sep=""))
+
+#######################
+# p-val histogram     #
+#######################
+pdf("01_pVal_histogram_voom.pdf", height=12,width=12)
+par(mfrow=c(6,2))
+for(i in 1:ncol(Voom.pvalues)){
+  hist(as.matrix(Voom.pvalues[,i]), breaks=100, col=rainbow(ncol(Voom.pvalues))[i], main=names(Voom.pvalues[i]))}
+dev.off()
+#######################
+# Clustering with voom #
+#######################
+FPKM <- voom.data$E
+matcor2 <- cor(FPKM, method="pearson", use="complete")
+pdf("1_SamplePearsonClustering_voom.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+pdf("1_SamplePearsonClustering_voom_no_col_dendro.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, Colv=NA,col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+
+
+######################
+
+#signal correlation plots [from network preprocessing]--------------
+IAC2<-matcor2
+pdf("2_IAC_dendro_voom.pdf",width=15,height=15)
+cluster2=hclust(as.dist(1-IAC2),method="average")
+plot(cluster2,cex=1.1,labels=dimnames(FPKM)[[2]])
+dev.off()
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+#########################################
+
+Y=gsub("_vs_.*","",colnames(my.contrasts))
+Z=gsub(".*_vs_","",colnames(my.contrasts))
+
+
+##############
+Y<-gsub("-",".",Y)
+Z<-gsub("-",".",Z)
+###############
+
+
+
+
+list.mod<-list()
+vst<-2^voom.data$E
+for (i in 1:(dim(my.contrasts)[2])){
+  if(length(group[group==Z[i]])>1){
+  cat(paste("Comparison number",i,":",colnames(my.contrasts)[i],"\n"))
+  list.mod[[i]] <-log2((vst[ ,names(group[group==Y[i]])] +1)/(rowMeans(vst[ ,names(group[group==Z[i]])]+1)))
+  }
+  else{
+    list.mod[[i]] <-log2((vst[ ,names(group[group==Y[i]])] +1)/(vst[ ,names(group[group==Z[i]])]+1))
+  }
+}
+
+
+LFC<-data.frame(list.mod[[1]])
+for (i in 2:(dim(my.contrasts)[2])){
+  cat(paste("LFC calculation for comparison",i,"is done. This is based on normalization with equal library size.\n"))
+  LFC  <- cbind(LFC,list.mod[[i]])
+}
+##SigGene size 900
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("3_DEG_heatmap2_ColDendrogram_all_voom.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:(dim(my.contrasts)[2])){
+  nCol<-c(nCol,rep(col_default[i], table(conds$group==Y[i])[2]))
+  nName<-c(nName,rep(colnames(my.contrasts)[i],table(conds$group==Y[i])[2]))
+}
+heatmap.2(as.matrix(LFC[anyDEG,]), ColSideColors=nCol,trace="none", dendrogram="both", scale="row", col=greenred(100), labRow=NA , cexCol=0.75,margins=c(15,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("padj<",padj,sep=""))
+dev.off()
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+# no dendrogram sorted by sample        #
+#########################################
+nLFC <- gsub("LFC_","",colnames(Voom.logFC))
+nLFC
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("4_DEG_heatmap2_noDendrogram_all_voom.pdf", height=14, width=10)
+heatmap.2(as.matrix(LFC[anyDEG,]), Colv=FALSE,trace="none", dendrogram="row", scale="row", col=greenred(100), ColSideColors=nCol, labRow=NA , cexCol=0.75,margins=c(15,8))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.8,ncol=2)
+title(paste("padj<",padj,sep=""))
+dev.off()
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+#########################################
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(Voom.logFC[anyDEG,])
+pdf("5_DEG_heatmap2_ColDendrogram_voom.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:(dim(my.contrasts)[2])){
+  nCol=c(nCol,col_default[i])
+  nName<-c(nName,colnames(my.contrasts)[i])
+}
+
+heatmap.2(as.matrix(Voom.logFC[anyDEG,]), trace="none", dendrogram="both", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(20,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("All DEG FDR<",padj," Heatmap",sep=""))
+dev.off()
+
+#######################################################
+# Heatmap Dendrogram top 1000 SIG GENES NO DENDROGRAM #
+#######################################################
+pdf("6_DEG_heatmap2_NoColDendrogram_voom.pdf", height=14, width=14)
+heatmap.2(as.matrix(Voom.logFC[anyDEG,]), Colv=F,trace="none", dendrogram="row", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(18,15))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.7,ncol=2)
+title(paste("Heatmap All DEG FDR<",padj,sep=""))
+dev.off()
+
+#############################
+#  Contrast Analysis Figure #
+#############################
+pdf("7_contrastAnalysis_Voom_limma.pdf")
+lfc <- Voom.logFC
+lfc <- cbind(lfc, Voom.adjpvalues)
+ups <- NA
+downs <- NA
+for(i in 1:ncol(Voom.adjpvalues))
+{
+  downs <- c(downs, -length(which(lfc[which(lfc[,i+ncol(Voom.adjpvalues)] < padj),i] < 0)))
+  ups <- c(ups, length(which(lfc[which(lfc[,i+ncol(Voom.adjpvalues)] < padj),i]>0)))
+}
+print(ups)
+print(downs)
+mx <- max(ups[is.na(ups)==FALSE])
+mn <- min(downs[is.na(downs)==FALSE])
+bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", )
+bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+labs <- NA
+fullNames <- gsub("_logFC" ,"", colnames(lfc[,1:ncol(Voom.adjpvalues)])) # DO THIS RIGHT ORDER!!!
+for(tis in fullNames){
+  labs <- c(labs, tis)
+}
+labs <- labs[is.na(labs)==FALSE]
+text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+title(main=paste("Differentially Expressed Genes @ FDR<",padj,sep=""))
+dev.off()
+
+
+################################Yue
+# pdf("7_contrastAnalysis_Voom_limma.pdf")
+# lfc <- Voom.logFC
+# lfc <- cbind(lfc, Voom.pvalues)
+# ups <- NA
+# downs <- NA
+# for(i in 1:ncol(Voom.pvalues))
+# {
+#   downs <- c(downs, -length(which(lfc[which(lfc[,i+ncol(Voom.pvalues)] < padj),i] < 0)))
+#   ups <- c(ups, length(which(lfc[which(lfc[,i+ncol(Voom.pvalues)] < padj),i]>0)))     
+# }
+# print(ups)
+# print(downs)
+# mx <- max(ups[is.na(ups)==FALSE])
+# mn <- min(downs[is.na(downs)==FALSE])
+# bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", ) 
+# bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+# axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+# axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+# labs <- NA
+# fullNames <- gsub("_logFC" ,"", colnames(lfc[,1:ncol(Voom.pvalues)])) # DO THIS RIGHT ORDER!!!
+# for(tis in fullNames){
+#   labs <- c(labs, tis)
+# }
+# labs <- labs[is.na(labs)==FALSE]
+# text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+# title(main=paste("Differentially Expressed Genes @ p<",padj,sep=""))
+# dev.off()
+
+################################
+# heatmap plus of top 100 deg  #
+################################
+
+topDEG <- rownames(head(SigGene[order(SigGene$Rank),], 100))
+pdf("8_top100DEG_FDR10percent_normalized_heatmap_voom_limma.pdf",  height=11, width=9)
+heatmap.plus(voom.data$E[topDEG, ], col=bluered(100), ColSideColors=clab[,1:2], main=paste(" Top 100 DEG at FDR <",padj,sep=""), cexCol=0.9, cexRow=0.7,margins=c(10,15))
+legend("topright", legend=unique(conds$group), fill=unique(clab[,2]),cex=0.7)
+dev.off()
+#################################################################
+#  limma 
+#################################################################
+cds <- newCountDataSet(rawCounts[which(!is.na(rowMeans(rawCounts))),], conds$group)
+cds <- estimateSizeFactors( cds )
+cds <- estimateDispersions( cds )
+vsd <- getVarianceStabilizedData( cds )
+DESeq.vst = vsd
+DESeq.vst.fitlimma = lmFit(DESeq.vst, design = design)
+##################################################################
+sizeText=0.7
+#############################################
+pdf("RefSeq_MDSplot_VSD_filtered.pdf", width=10,height=10)
+data <- vsd
+ldat <- dist(t(data))
+fit <- isoMDS(ldat, k=2)
+x <- fit$points[,1]
+y <- fit$points[,2]
+plot(x, y, xlab="Coordinate 1", ylab="Coordinate 2", main="VSD normalized All Samples MDS", type="n",cex=1,col=clab[,2],xlim=c(min(x)*1.4,max(x)*1.4))
+text(x, y, labels = row.names(t(data)), cex=sizeText, col=clab[,2])
+legend("topright", legend=unique(conds$group), fill=unique(clab[,2]),cex=sizeText)
+dev.off()
+#############################################
+my.contrasts<-makeContrasts("WT_ValproicAcid_vs_WT_Control"=WT_ValproicAcid - WT_Control,
+                            "WT_SAHA_vs_WT_Control"=WT_SAHA - WT_Control,
+                            "IDH1m_ValproicAcid_vs_IDH1m_Control"=IDH1m_ValproicAcid - IDH1m_Control,
+                            "IDH1m_SAHA_vs_IDH1m_Control"=IDH1m_SAHA - IDH1m_Control,
+                            levels=design)
+
+my.contrasts
+
+fit2.anova<- contrasts.fit(DESeq.vst.fitlimma, my.contrasts) 
+fitb<- eBayes(fit2.anova) 
+
+#selecting the statistical cutoff
+decide <- matrix(c("fdr",0.01, "fdr",0.05,"fdr",0.1,"none",0.01,"none",0.05, "none", 0.1),nrow=6,ncol=2,byr=T)
+
+# initialize:
+mysum <- as.list(1:nrow(decide))
+mynum <- 0
+maxmax <- 0
+
+for (test in 1:nrow(decide)){
+  results<-decideTests(fitb, adjust.method=decide[test,1],p=as.numeric(decide[test,2]))
+  
+  summary(results) -> mysum[[test]]
+  mynum[test] <-length(which(apply(results,1,function(x)any(x,na.rm=T))))
+  maxmax <- max(c(maxmax, as.vector(mysum[[test]][c(1,3),])))
+}
+
+pdf("0_threshold_selection_updated_limma.pdf", width=12,height=12)
+
+par(mfrow=c(2,3))
+for (test in 1:nrow(decide))
+{
+  as.numeric(as.vector(mysum[[test]][3,]))->plotMe1
+  as.numeric(as.vector(mysum[[test]][1,]))->plotMe2
+  maxData = max(plotMe1)
+  maxData2 = max(plotMe2)
+  
+  barplot(plotMe1,horiz=T,col="red",xlim=c(-maxmax,maxmax),
+          main=paste("Gene Changes \np<",decide[test,2], ", " , decide[test,1],
+                     " (" ,mynum[test] ,")",sep=""))->yy
+  barplot(-plotMe2,horiz=T,col="green",add=T)->yy
+  
+  xx<-vector("integer",ncol(mysum[[test]]))
+  text(xx,yy,gsub("^X","",colnames(mysum[[test]])))
+  text(.9*maxmax,yy+0.1,format(plotMe1,digits=3))
+  text( - .9*maxmax,yy+0.1,format(plotMe2,digits=3))
+}
+dev.off()
+
+########################################
+# Get FC & p-values & save the output  #
+########################################
+DESeq.vst.FC<-fit2.anova$coefficients
+colnames(DESeq.vst.FC)<-paste("logFC_",colnames(DESeq.vst.FC),sep="")
+DESeq.vst.pvalues<-fitb$p.value
+colnames(DESeq.vst.pvalues)<-paste("pVal_",colnames(DESeq.vst.pvalues),sep="")
+DESeq.vst.adjpvalues<-DESeq.vst.pvalues
+for (i in 1:dim(my.contrasts)[2]){
+  DESeq.vst.adjpvalues[,i]<-p.adjust(DESeq.vst.pvalues[,i],method="BH")
+}
+colnames(DESeq.vst.adjpvalues)<-paste("FDR_",colnames(DESeq.vst.adjpvalues),sep="")
+Rank <- rank(rowSums(-DESeq.vst), ties.method="first")
+DESeq.vst.count<-DESeq.vst
+colnames(DESeq.vst.count)<-paste(colnames(DESeq.vst.count),"_vst_count",sep="")
+DESeq.count<-rawCounts
+colnames(DESeq.count)<-paste(colnames(DESeq.count),"_raw_count",sep="")
+Annot <- genes[rownames(rawCounts),]
+fpkm<-fpkm[rownames(Annot),]
+avg_fpkm<-avg_fpkm[rownames(Annot),]
+Complete<-as.data.frame( cbind(Annot,Rank,avg_fpkm[,1],DESeq.vst.FC,DESeq.vst.pvalues,DESeq.vst.adjpvalues,fpkm,DESeq.vst.count,DESeq.count))
+dim(Complete)
+cpComp2<-Complete
+write.csv(Complete, file= "Complete_geneList_limma.csv")
+
+#################################
+#  save the output of sig Genes #
+#################################
+padj<-0.05
+mFDR<-apply(DESeq.vst.adjpvalues,1,min)
+length(mFDR)
+anyDEG <- names(mFDR[which(mFDR < padj)])
+length(anyDEG)
+SigGene <- Complete[anyDEG,]
+head(SigGene)
+tail(SigGene)
+dim(SigGene)
+SigGene <- SigGene[order(SigGene$Rank),]
+## 262
+write.csv(SigGene, file= paste("Significant_geneList_limma_FDR",padj,".csv",sep=""))
+
+
+################Yue pvalue
+# padj<-0.01
+# mFDR<-apply(DESeq.vst.pvalues,1,min)
+# length(mFDR)
+# anyDEG <- names(mFDR[which(mFDR < padj)])
+# length(anyDEG)
+# SigGene <- Complete[anyDEG,]
+# head(SigGene)
+# tail(SigGene)
+# dim(SigGene)
+# SigGene <- SigGene[order(SigGene$Rank),]
+# ## 262
+# write.csv(SigGene, file= paste("Significant_geneList_limma_p",padj,".csv",sep=""))
+
+
+
+#######################
+# p-val histogram     #
+#######################
+pdf("01_pVal_histogram.pdf", height=12,width=12)
+par(mfrow=c(6,2))
+for(i in 1:ncol(DESeq.vst.pvalues)){
+  hist(as.matrix(DESeq.vst.pvalues[,i]), breaks=100, col=rainbow(ncol(DESeq.vst.pvalues))[i], main=names(DESeq.vst.pvalues[i]))}
+dev.off()
+
+#######################
+# Clustering with VST #
+#######################
+FPKM <- DESeq.vst
+matcor2 <- cor(FPKM, method="pearson", use="complete")
+pdf("1_SamplePearsonClustering_limma.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+
+pdf("1_SamplePearsonClustering_no_col_dendro_limma.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, Colv=NA,col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+#######################
+#signal correlation plots [from network preprocessing]--------------
+IAC2<-matcor2
+pdf("2_IAC_dendro_limma.pdf",width=15,height=15)
+cluster2=hclust(as.dist(1-IAC2),method="average")
+plot(cluster2,cex=1.1,labels=dimnames(FPKM)[[2]])
+dev.off()
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+#########################################
+DESeq.vst<-2^DESeq.vst
+Y=gsub("_vs_.*","",colnames(my.contrasts))
+Z=gsub(".*_vs_","",colnames(my.contrasts))
+
+########
+Y<-gsub("-",".",Y)
+Z<-gsub("-",".",Z)
+########
+list.mod<-list()
+
+for (i in 1:(dim(my.contrasts)[2])){
+  if(length(group[group==Z[i]])>1){
+  cat(paste("Comparison number",i,":",colnames(my.contrasts)[i],"\n"))
+  list.mod[[i]] <-log2((DESeq.vst[ ,names(group[group==Y[i]])] +1)/(rowMeans(DESeq.vst[ ,names(group[group==Z[i]])]+1)))
+  }
+  else{
+    list.mod[[i]] <-log2((DESeq.vst[ ,names(group[group==Y[i]])] +1)/DESeq.vst[ ,names(group[group==Z[i]])]+1)
+  }
+}
+
+LFC<-data.frame(list.mod[[1]])
+for (i in 2:(dim(my.contrasts)[2])){
+  cat(paste("LFC calculation for comparison",i,"is done. This is based on normalization with equal library size.\n"))
+  LFC  <- cbind(LFC,list.mod[[i]])
+}
+
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("3_DEG_heatmap2_ColDendrogram_all_limma.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:(dim(my.contrasts)[2])){
+  nCol=c(nCol,rep(col_default[i], table(conds$group==Y[i])[2]))
+  nName<-c(nName,rep(colnames(my.contrasts)[i],table(conds$group==Y[i])[2]))
+}
+temp5<-as.matrix(LFC[anyDEG,])
+temp5<-temp5[complete.cases(temp5),]
+heatmap.2(temp5, ColSideColors=nCol,trace="none", dendrogram="both", scale="row", col=greenred(100), labRow=NA , cexCol=0.75,margins=c(15,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("padj<",padj,sep=""))
+dev.off()
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+# no dendrogram sorted by sample        #
+#########################################
+nLFC <- gsub("LFC_","",colnames(DESeq.vst.FC))
+nLFC
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("4_DEG_heatmap2_noDendrogram_all_limma.pdf", height=14, width=10)
+heatmap.2(temp5, Colv=FALSE,trace="none", dendrogram="row", scale="row", col=greenred(100), ColSideColors=nCol, labRow=NA , cexCol=0.75,margins=c(15,8))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.8,ncol=2)
+title(paste("padj<",padj,sep=""))
+dev.off()
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+#########################################
+pdf("5_DEG_heatmap2_ColDendrogram_limma.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:(dim(my.contrasts)[2])){
+  nCol=c(nCol,col_default[i])
+  nName<-c(nName,colnames(my.contrasts)[i])
+}
+
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+heatmap.2(as.matrix(DESeq.vst.FC[anyDEG,]), trace="none", dendrogram="both", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(20,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("All DEG FDR<",padj," Heatmap",sep=""))
+dev.off()
+#######################################################
+# Heatmap Dendrogram top 1000 SIG GENES NO DENDROGRAM #
+#######################################################
+pdf("6_DEG_heatmap2_NoColDendrogram_limma.pdf", height=14, width=14)
+heatmap.2(as.matrix(DESeq.vst.FC[anyDEG,]), Colv=F,trace="none", dendrogram="row", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(18,15))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.7,ncol=2)
+title(paste("Heatmap All DEG FDR<",padj,sep=""))
+dev.off()
+
+#############################
+#  Contrast Analysis Figure #
+#############################
+pdf("7_contrastAnalysis_limma.pdf")
+lfc <- DESeq.vst.FC
+lfc <- cbind(lfc, DESeq.vst.adjpvalues)
+ups <- NA
+downs <- NA
+numComp<-dim(DESeq.vst.FC)[2]
+for(i in 1:numComp)
+{
+  downs <- c(downs, -table(lfc[,i]<0&lfc[,i+numComp]<padj)[2])
+  ups <- c(ups, table(lfc[,i]>0&lfc[,i+numComp]<padj)[2])
+}
+ups[is.na(ups)]=0
+downs[is.na(downs)]=0
+ups[1]=NA
+downs[1]=NA
+print(ups)
+print(downs)
+names(ups)=c("","")
+names(downs)=c("","")
+mx <- max(ups[is.na(ups)==FALSE])
+mn <- min(downs[is.na(downs)==FALSE])
+bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", )
+bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+labs <- colnames(my.contrasts)
+labs <- labs[is.na(labs)==FALSE]
+text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+title(main=paste("Differentially Expressed Genes @ FDR<",padj,sep=""))
+dev.off()
+
+###############################Yue
+# pdf("7_contrastAnalysis_limma.pdf")
+# lfc <- DESeq.vst.FC
+# lfc <- cbind(lfc, DESeq.vst.pvalues)
+# ups <- NA
+# downs <- NA
+# numComp<-dim(DESeq.vst.FC)[2]
+# for(i in 1:numComp)
+# {
+#   downs <- c(downs, -table(lfc[,i]<0&lfc[,i+numComp]<padj)[2])
+#   ups <- c(ups, table(lfc[,i]>0&lfc[,i+numComp]<padj)[2])   
+# }
+# ups[is.na(ups)]=0
+# downs[is.na(downs)]=0
+# ups[1]=NA
+# downs[1]=NA
+# print(ups)
+# print(downs)
+# names(ups)=c("","")
+# names(downs)=c("","")
+# mx <- max(ups[is.na(ups)==FALSE])
+# mn <- min(downs[is.na(downs)==FALSE])
+# bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", ) 
+# bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+# axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+# axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+# labs <- colnames(my.contrasts)
+# labs <- labs[is.na(labs)==FALSE]
+# text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+# title(main=paste("Differentially Expressed Genes @ p<",padj,sep=""))
+# dev.off()
+
+################################
+# heatmap plus of top 100 deg  #
+################################
+
+topDEG <- rownames(head(SigGene[order(SigGene$Rank),], 100))
+pdf("8_top100DEG_FDR10percent_normalized_heatmap_limma.pdf",  height=11, width=9)
+heatmap.plus(as.matrix(DESeq.vst.count[topDEG, ]), col=bluered(100), ColSideColors=clab[,1:2], main=paste(" Top 100 DEG at FDR <",padj,sep=""), cexCol=0.9, cexRow=0.7,margins=c(10,15))
+legend("topright", legend=unique(conds$group), fill=unique(clab[,2]),cex=0.7)
+dev.off()
+
+#################################################################
+#################################################################
+#  EdgeR 
+#################################################################
+#################################################################
+A <- rawCounts
+
+y <- DGEList(counts=A, genes=rownames(A), group=group,remove.zeros=TRUE)
+y <- calcNormFactors(y,method="TMM")
+#y <- estimateCommonDisp(y,design)
+y <- estimateCommonDisp(y)
+y <- estimateGLMCommonDisp(y,design)
+y <- estimateGLMTrendedDisp(y,design)
+y <- estimateGLMTagwiseDisp(y, design)
+
+pdf("00_Disp_estimation_EdgeR.pdf",height=8,width=10)
+plotBCV(y)
+dev.off()
+###
+fit <- glmFit(y,design)
+colnames(fit)
+d<-y$pseudo.counts
+w<-y
+colnames(my.contrasts)
+dim(my.contrasts)
+list.lrt=list()
+list.lrt.out=list()
+list.fitVal<-list()
+
+#Y=gsub("_vs_.*","",colnames(my.contrasts))
+#Z=gsub(".*_vs_","",colnames(my.contrasts))
+
+for (i in 1:dim(my.contrasts)[2]){
+  lrt<-glmLRT(fit, contrast=my.contrasts[,colnames(my.contrasts)[i]])
+  lrt$table <- cbind(lrt$table, FDR=p.adjust(lrt$table$PValue,method="BH"))
+  names(lrt$table) <- paste(names(lrt$table),colnames(my.contrasts)[i], sep="_")
+  lrt.out<-lrt$table
+  list.lrt[[i]]<-lrt
+  list.lrt.out[[i]]<-lrt.out
+  list.fitVal[[i]]<-lrt$fitted.values
+}
+
+#combine all contrasts
+lrtTot<-data.frame(ensGene=rownames(list.lrt.out[[1]]))
+for (i in 1:dim(my.contrasts)[2]){
+  lrtTot<-cbind(lrtTot,list.lrt.out[[i]]) 
+}
+head(lrtTot)
+
+###############################################
+# Cal fold change (LFC) for individual sample #
+###############################################
+levels(group)
+list.mod<-list()
+
+#mod10 <-log((d[ ,names(group[group==levels(group)[10]])] +1)/(rowMeans(d[ ,names(group[group==levels(group)[22]])]+1)))
+# extract sample name from comparison
+colnames(my.contrasts)
+# Y_vs_Z
+#Y=gsub("_vs_.*","",colnames(my.contrasts))
+#Z=gsub(".*_vs_","",colnames(my.contrasts))
+list.mod<-list()
+list.mod.fit<-list()
+for (i in 1:dim(my.contrasts)[2]){
+  if(length(names(group[group==Z[i]]))>1){
+  cat(paste("Comparison number",i,":",colnames(my.contrasts)[i],"\n"))
+  list.mod[[i]] <-log2((d[ ,names(group[group==Y[i]])] +1)/(rowMeans(d[ ,names(group[group==Z[i]])]+1)))
+  list.mod.fit[[i]]<-log2((list.fitVal[[i]][ ,names(group[group==Y[i]])] +1)/(rowMeans(list.fitVal[[i]][ ,names(group[group==Z[i]])]+1)))
+  }
+  else{
+    cat(paste("Comparison number",i,":",colnames(my.contrasts)[i],"\n"))
+    list.mod[[i]] <-data.frame(log2((d[ ,names(group[group==Y[i]])] +1)/(d[ ,names(group[group==Z[i]])]+1)))
+    colnames(list.mod[[i]])=names(group[group==Y[i]])
+    list.mod.fit[[i]]<-data.frame(log2((list.fitVal[[i]][ ,names(group[group==Y[i]])] +1)/(list.fitVal[[i]][ ,names(group[group==Z[i]])]+1)))
+    colnames(list.mod.fit[[i]])=names(group[group==Y[i]])
+    }
+}
+
+
+LFC<-data.frame(list.mod[[1]])
+LFC.fit<-data.frame(list.mod.fit[[1]])
+for (i in 2:dim(my.contrasts)[2]){
+  cat(paste("LFC calculation for comparison",i,"is done. This is based on normalization with equal library size.\n"))
+  LFC  <- cbind(LFC,list.mod[[i]])
+  LFC.fit <-cbind(LFC.fit,list.mod.fit[[i]])
+}
+
+
+dim(LFC)
+tail(LFC[rownames(lrtTot),])
+LFC <- LFC[rownames(lrtTot),]
+dim(LFC)
+colnames(LFC)<-gsub("_normlizedCount","",colnames(LFC))
+LFCcp<-LFC
+j=1
+for (i in 1:dim(my.contrasts)[2]){
+  #cat(paste("i=",i," j=",j," temp=",j+dim(list.mod[[i]])[2]-1),"\n")
+  if(dim(list.mod[[i]])[2]>=1){
+  colnames(LFCcp)[j:(j+dim(list.mod[[i]])[2]-1)]<-paste(colnames(LFCcp)[j:(j+dim(list.mod[[i]])[2]-1)],"_vs_",Z[i],sep="")
+  colnames(LFC.fit)[j:(j+dim(list.mod[[i]])[2]-1)]<-paste("fitted.logFC.",colnames(LFC.fit)[j:(j+dim(list.mod[[i]])[2]-1)],"_vs_",Z[i],sep="")  
+  j=j+dim(list.mod[[i]])[2]
+  }
+  else{
+    colnames(LFCcp)[j:(j+dim(list.mod[[i]])[2]-1)]<-paste(colnames(LFCcp)[j],"_vs_",Z[i],sep="")
+    colnames(LFC.fit)[j:(j+dim(list.mod[[i]])[2]-1)]<-paste("fitted.logFC.",colnames(LFC.fit)[j],"_vs_",Z[i],sep="")  
+    j=j+dim(list.mod[[i]])[2]
+  }
+}
+
+######################
+# Export Entire data #
+######################
+#create a spreadsheet for complete data
+Annot <- genes[rownames(lrtTot),]
+logFC <- lrtTot[ , grep("logFC", colnames(lrtTot))]
+pVal <- lrtTot[ , grep("PValue", colnames(lrtTot))]
+FDR <- lrtTot[ , grep("FDR", colnames(lrtTot))]
+LogConcentration <- lrtTot[, grep("logCPM", colnames(lrtTot))]
+LR <- lrtTot[ , grep("LR", colnames(lrtTot))]
+Rank <- rank(rowSums(-d), ties.method="first")
+colnames(d)<-paste(colnames(d), "normlizedCount",sep="_")
+fpkm<-fpkm[rownames(Annot),]
+avg_fpkm<-avg_fpkm[rownames(Annot),]
+Complete<-as.data.frame( cbind(Annot,Rank,avg_fpkm[,1],logFC,pVal, FDR,LFCcp,fpkm,d,w$counts)) 
+rownames(Complete)<-lrtTot$ensGene
+Complete <- Complete[order(Complete$Rank),]
+cpComp3<-Complete
+write.csv(Complete, file= "Complete_geneList_EdgeR.csv")
+
+####################
+#significant list #
+###################
+padj=0.05
+head(FDR)
+mFDR <- apply(FDR, 1, min)
+length(mFDR)
+anyDEG <- names(mFDR[which(mFDR < padj)])
+length(anyDEG)
+head(anyDEG)
+tail(anyDEG)
+SigGene <- Complete[anyDEG,]
+head(SigGene)
+tail(SigGene)
+dim(SigGene)
+SigGene <- SigGene[order(SigGene$Rank),]
+write.csv(SigGene, file= paste("Significant_geneList_FDR",padj,"_EdgeR",".csv",sep=""))
+
+###################Yue
+# padj=0.01
+# head(FDR)
+# mFDR <- apply(pVal, 1, min)
+# length(mFDR)
+# anyDEG <- names(mFDR[which(mFDR < padj)])
+# length(anyDEG)
+# head(anyDEG)
+# tail(anyDEG)
+# SigGene <- Complete[anyDEG,]
+# head(SigGene)
+# tail(SigGene)
+# dim(SigGene)
+# SigGene <- SigGene[order(SigGene$Rank),]
+# write.csv(SigGene, file= paste("Significant_geneList_p",padj,"_EdgeR",".csv",sep=""))
+
+
+#######################
+# p-val histogram     #
+#######################
+pdf("01_pVal_histogram_EdgeR.pdf", height=12,width=12)
+par(mfrow=c(6,2))
+for(i in 1:ncol(pVal)){
+  hist(as.matrix(pVal[,i]), breaks=100, col=rainbow(ncol(pVal))[i], main=names(pVal[i]))}
+dev.off()
+#######################
+# Clustering with EdgeR #
+#######################
+FPKM <- log2(w$pseudo.counts+0.5)
+matcor2 <- cor(FPKM, method="pearson", use="complete")
+pdf("1_SamplePearsonClustering_EdgeR.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+pdf("1_SamplePearsonClustering_EdgeR_no_col_dendro.pdf", width=10,height=10) #QUESTION
+heatmap.plus(matcor2, Colv=NA,col=rev(heat.colors(100)), main="Sample Pearson correlation - Normalized", ColSideColors=clab[,1:2], cexRow=1, cexCol=1, margins=c(17,20))
+legend("topright",legend=unique(conds$group),ncol=as.integer(length(unique(conds$group))/10)+1,fill=unique(clab[,2]),cex=1)
+dev.off()
+########################
+#signal correlation plots [from network preprocessing]--------------
+IAC2<-matcor2
+pdf("2_IAC_dendro_EdgeR.pdf",width=15,height=15)
+cluster2=hclust(as.dist(1-IAC2),method="average")
+plot(cluster2,cex=1.1,labels=dimnames(FPKM)[[2]])
+dev.off()
+#######################
+# Threshold selection #
+#######################
+#selecting the statistical cutoff
+decide <- matrix(c("fdr",0.01, "fdr",0.05,"fdr",0.1,"none",0.01,"none",0.05, "none", 0.1),nrow=6,ncol=2,byr=T)
+
+# initialize:
+mysum <- as.list(1:nrow(decide))
+mynum <- 0
+maxmax <- 0
+
+for (i in 1:nrow(decide))
+{
+  mysum[[i]]<-as.table(matrix(data=NA,nrow=3,ncol=dim(my.contrasts)[2]))
+  rownames(mysum[[i]])<-c(1,0,-1)
+  colnames(mysum[[i]])<-colnames(my.contrasts)
+}
+
+tempDat<-cbind(logFC,FDR,pVal)
+ncont<-dim(my.contrasts)[2]
+for (test in 1:3){
+  for (i in 1:ncont){
+    result<-summary(tempDat[,i]>0&tempDat[,i+ncont]<as.numeric(decide[test,2]))
+    mysum[[test]][1,i]=as.numeric(result[names(result)=="TRUE"][1])   #logFC>0
+    if(is.na(mysum[[test]][1,i]))
+      mysum[[test]][1,i]=0
+    result<-summary(tempDat[,i+ncont]>=as.numeric(decide[test,2]))
+    mysum[[test]][2,i]=as.numeric(result[names(result)=="TRUE"][1])   # no change
+    if(is.na(mysum[[test]][2,i]))
+      mysum[[test]][2,i]=0
+    result<-summary(tempDat[,i]<0&tempDat[,i+ncont]<as.numeric(decide[test,2]))
+    mysum[[test]][3,i]=as.numeric(result[names(result)=="TRUE"][1])  #logFC<0
+    if(is.na(mysum[[test]][3,i]))
+      mysum[[test]][3,i]=0
+  }
+  maxmax <- max(c(maxmax, as.vector(mysum[[test]][c(1,3),])))
+  testdat<-tempDat[,(ncont+1):(ncont*2)]<as.numeric(decide[test,2])
+  mynum[test] <-length(which(apply(testdat,1,function(x)any(x,na.rm=T))))
+}
+
+for (test in 4:6){
+  for (i in 1:ncont){
+    result<-summary(tempDat[,i]>0&tempDat[,i+ncont*2]<as.numeric(decide[test,2]))
+    mysum[[test]][1,i]=as.numeric(result[names(result)=="TRUE"][1])   #logFC>0
+    if(is.na(mysum[[test]][1,i]))
+      mysum[[test]][1,i]=0
+    result<-summary(tempDat[,i+ncont*2]>=as.numeric(decide[test,2]))
+    mysum[[test]][2,i]=as.numeric(result[names(result)=="TRUE"][1])   # no change
+    if(is.na(mysum[[test]][2,i]))
+      mysum[[test]][2,i]=0
+    result<-summary(tempDat[,i]<0&tempDat[,i+ncont*2]<as.numeric(decide[test,2]))
+    mysum[[test]][3,i]=as.numeric(result[names(result)=="TRUE"][1])  #logFC<0
+    if(is.na(mysum[[test]][3,i]))
+      mysum[[test]][3,i]=0
+  }
+  maxmax <- max(c(maxmax, as.vector(mysum[[test]][c(1,3),])))
+  testdat<-tempDat[,(ncont*2+1):(ncont*3)]<as.numeric(decide[test,2])
+  mynum[test] <-length(which(apply(testdat,1,function(x)any(x,na.rm=T))))
+}
+
+pdf("0_threshold_selection_updated_EdgeR.pdf", width=12,height=12)
+
+par(mfrow=c(2,3))
+for (test in 1:nrow(decide))
+{
+  as.numeric(as.vector(mysum[[test]][1,]))->plotMe1
+  as.numeric(as.vector(mysum[[test]][3,]))->plotMe2
+  maxData = max(plotMe1)
+  maxData2 = max(plotMe2)
+  cat(maxData)
+  cat(" ")
+  cat(maxData2)
+  cat(" ")
+  barplot(plotMe1,horiz=T,col="red",xlim=c(-maxmax,maxmax),
+          main=paste("Gene Changes \np<",decide[test,2], ", " , decide[test,1],
+                     " (" ,mynum[test] ,")",sep=""))->yy
+  barplot(-plotMe2,horiz=T,col="green",add=T)->yy
+  
+  xx<-vector("integer",ncol(mysum[[test]]))
+  text(xx,yy,colnames(mysum[[test]]))
+  text((plotMe1+10)*0 + .9*maxmax,yy+0.1,format(plotMe1,digits=3))
+  text((-plotMe2-10)*0 - .9*maxmax,yy+0.1,format(plotMe2,digits=3))
+}
+dev.off()
+
+
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+#########################################
+nLFC <- gsub("LFC_","",colnames(LFC))
+nLFC
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("3_DEG_heatmap2_ColDendrogram_all_EdgeR.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:(dim(my.contrasts)[2])){
+  nCol=c(nCol,rep(col_default[i], table(conds$group==Y[i])[2]))
+  nName<-c(nName,rep(colnames(my.contrasts)[i],table(conds$group==Y[i])[2]))
+}
+heatmap.2(as.matrix(LFC[anyDEG,]), trace="none", dendrogram="both", scale="row", col=greenred(100), ColSideColors=nCol, labRow=NA , cexCol=0.75,margins=c(15,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("padj<",padj,sep=""))
+dev.off()
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+# Show all replicates against avg CT    #
+# no dendrogram sorted by sample        #
+#########################################
+nLFC <- gsub("LFC_","",colnames(LFC))
+nLFC
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(LFC[anyDEG,])
+pdf("4_DEG_heatmap2_noDendrogram_all_EdgeR.pdf", height=14, width=10)
+heatmap.2(as.matrix(LFC[anyDEG,]), Colv=FALSE,trace="none", dendrogram="row", scale="row", col=greenred(100), ColSideColors=nCol, labRow=NA , cexCol=0.75,margins=c(15,8))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.8,ncol=2)
+title(paste("padj<",padj,sep=""))
+dev.off()
+#########################################
+# Heatmap Dendrogram top 1000 SIG GENES #
+#########################################
+nLFC <- gsub("logFC_","",colnames(logFC))
+nLFC
+anyDEG <- rownames(head(SigGene[order(SigGene$Rank),], 1000))
+head(logFC[anyDEG,])
+pdf("5_DEG_heatmap2_ColDendrogram_EdgeR.pdf", height=14, width=14)
+nCol=character(0)
+nName=character(0)
+for (i in 1:dim(my.contrasts)[2]){
+  nCol=c(nCol,col_default[i])
+  nName<-c(nName,colnames(my.contrasts)[i])
+}
+
+heatmap.2(as.matrix(logFC[anyDEG,]), trace="none", dendrogram="both", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(20,24))
+legend("topright", legend=unique(nName), fill=unique(nCol),cex=0.8)
+title(paste("All DEG FDR<",padj," Heatmap",sep=""))
+dev.off()
+#######################################################
+# Heatmap Dendrogram top 1000 SIG GENES NO DENDROGRAM #
+#######################################################
+pdf("6_DEG_heatmap2_NoColDendrogram_EdgeR.pdf", height=14, width=14)
+heatmap.2(as.matrix(logFC[anyDEG,]), Colv=F,trace="none", dendrogram="row", labRow=NA, col=greenred(60), ColSideColors=nCol,cexCol=0.85, cexRow=0.85, keysize=1, breaks=c(-6,-5.5,-5,-4.5,-4,-3.5,-3,-2.5,-2,-1.5, seq(-1,1,0.05),1.5,2,2.5,3,3.5,4,4.5,5,5.5,6),margins=c(18,15))
+legend("top", legend=unique(nName), fill=unique(nCol),cex=0.7,ncol=2)
+title(paste("Heatmap All DEG FDR<",padj,sep=""))
+dev.off()
+
+#############################
+#  Contrast Analysis Figure #
+#############################
+pdf("7_contrastAnalysis_EdgeR.pdf")
+lfc <- logFC
+lfc <- cbind(lfc, FDR)
+ups <- NA
+downs <- NA
+for(i in 1:ncol(FDR))
+{
+  downs <- c(downs, -length(which(lfc[which(lfc[i+ncol(FDR)] < padj),i] < 0)))
+  ups <- c(ups, length(which(lfc[which(lfc[i+ncol(FDR)] < padj),i]>0)))
+}
+print(ups)
+print(downs)
+mx <- max(ups[is.na(ups)==FALSE])
+mn <- min(downs[is.na(downs)==FALSE])
+bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", )
+bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+labs <- NA
+fullNames <- gsub("_logFC" ,"", colnames(lfc[,1:ncol(FDR)])) # DO THIS RIGHT ORDER!!!
+for(tis in fullNames){
+  labs <- c(labs, tis)
+}
+labs <- labs[is.na(labs)==FALSE]
+text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+title(main=paste("Differentially Expressed Genes @ FDR<",padj,sep=""))
+dev.off()
+
+################################Yue
+# pdf("7_contrastAnalysis_EdgeR.pdf")
+# lfc <- logFC
+# lfc <- cbind(lfc, pVal)
+# ups <- NA
+# downs <- NA
+# for(i in 1:ncol(pVal))
+# {
+#   downs <- c(downs, -length(which(lfc[which(lfc[i+ncol(pVal)] < padj),i] < 0)))
+#   ups <- c(ups, length(which(lfc[which(lfc[i+ncol(pVal)] < padj),i]>0)))     
+# }
+# print(ups)
+# print(downs)
+# mx <- max(ups[is.na(ups)==FALSE])
+# mn <- min(downs[is.na(downs)==FALSE])
+# bp1 <- barplot(downs,horiz=TRUE,xlim=c(mn,mx), col="green", ) 
+# bp2 <- barplot(ups, horiz=TRUE,xlim=c(mn,mx), col="red",add=TRUE,axes=TRUE)
+# axis(2, at=bp1[2:length(bp1)],tick=FALSE,labels=downs[is.na(downs)==FALSE],las=1)
+# axis(4,at=bp2[2:length(bp2)],tick=FALSE,labels=ups[is.na(ups)==FALSE], las=1,line=-2)
+# labs <- NA
+# fullNames <- gsub("_logFC" ,"", colnames(lfc[,1:ncol(pVal)])) # DO THIS RIGHT ORDER!!!
+# for(tis in fullNames){
+#   labs <- c(labs, tis)
+# }
+# labs <- labs[is.na(labs)==FALSE]
+# text(x=0,y=bp2[2:length(bp2)], labels=gsub("logFC_","",labs))
+# title(main=paste("Differentially Expressed Genes @ p<",padj,sep=""))
+# dev.off()
+
+
+################################
+# heatmap plus of top 100 deg  #
+################################
+
+topDEG <- rownames(head(SigGene[order(SigGene$Rank),], 100))
+pdf("8_top100DEG_FDR10percent_normalized_heatmap_EdgeR.pdf",  height=11, width=9)
+heatmap.plus(log2(w$pseudo.counts[topDEG, ]+0.0001), col=bluered(100), ColSideColors=clab[,1:2], main=paste(" Top 100 DEG at FDR <",padj,sep=""), cexCol=0.9, cexRow=0.7,margins=c(10,15))
+legend("topright", legend=unique(conds$group), fill=unique(clab[,2]),cex=0.7)
+dev.off()
+
+################
+# Overlap test #
+################
+
+cpComp3<-cpComp3[rownames(cpComp2),]
+temp<-cbind(cpComp1[,c(grep("logFC",colnames(cpComp1)),grep("FDR_",colnames(cpComp1)))],cpComp2[,c(grep("logFC",colnames(cpComp2)),grep("FDR_",colnames(cpComp2)))],cpComp3[rownames(cpComp3),c(grep("logFC",colnames(cpComp3)),grep("FDR_",colnames(cpComp3)))])
+
+pdf(paste("9_Overlap_venn_limma_Voom_and_EdgR.pdf", sep=""), height=14, width=12)
+par(mfrow=c(4,2))
+num<-dim(my.contrasts)[2]
+for (i in 1:num){
+  InVen <- data.frame(temp[,i]>0&temp[,i+num]<padj,temp[,i+num*2]>0&temp[,i+num*3]<padj,temp[,i+num*4]>0&temp[,i+num*5]<padj)
+  colnames(InVen) <-c("Voom+Limma","limma","EdgeR")
+  head(InVen)
+  vennDiagram(InVen, circle.col=c("purple","yellowgreen","blue"), counts.col="red",cex=0.8, main=paste(colnames(my.contrasts)[i],"\nlogFC>0,fdr<",padj,sep=""),mar=c(1,1,3,1))
+  InVen <- data.frame(temp[,i]<0&temp[,i+num]<padj,temp[,i+num*2]<0&temp[,i+num*3]<padj,temp[,i+num*4]<0&temp[,i+num*5]<padj)
+  colnames(InVen) <-c("Voom+Limma","limma","EdgeR")
+  head(InVen)
+  vennDiagram(InVen, circle.col=c("purple","yellowgreen","blue"), counts.col="red",cex=0.8, main=paste(colnames(my.contrasts)[i],"\nlogFC<0,fdr<",padj,sep=""),mar=c(1,1,3,1))
+}
+dev.off()
+
+
+library(UpSetR)
+library(gridExtra)
+library(grid)
+
+cpComp3<-cpComp3[rownames(cpComp2),]
+temp<-cbind(cpComp1[,c(grep("logFC",colnames(cpComp1)),grep("FDR_",colnames(cpComp1)))],cpComp2[,c(grep("logFC",colnames(cpComp2)),grep("FDR_",colnames(cpComp2)))],cpComp3[rownames(cpComp3),c(grep("logFC",colnames(cpComp3)),grep("FDR_",colnames(cpComp3)))])
+
+num<-dim(my.contrasts)[2]
+vp<-list()
+
+for (i in 1:num){
+  # up-regulated genes
+  InVen <- data.frame(temp[,i]>0&temp[,i+num]<padj,temp[,i+num*2]>0&temp[,i+num*3]<padj,temp[,i+num*4]>0&temp[,i+num*5]<padj)
+  colnames(InVen) <-c("Voom+Limma ","limma","EdgeR")
+  for (j in 1:ncol(InVen)){InVen[,j]<-as.integer(InVen[,j])}
+  a<-apply(InVen,2,sum)
+  b<-table(a==0)["FALSE"];if(is.na(b)){b=0}
+  if(b==3){
+  upset(InVen, nsets = 4, nintersects = NA,main.bar.color="blue",matrix.color="darkgreen",sets.bar.color="darkgrey",text.scale=1.5,order.by="freq",decreasing="TRUE",mainbar.y.label=paste(colnames(my.contrasts)[i],"\nlogFC>0,p<",padj,sep=""))
+  grid.edit('arrange',name='arrange2')
+  vp[[i*2-1]] = grid.grab()
+  }
+  if(b==2){
+    InVen<-InVen[,a!=0]
+    upset(InVen, nsets = 3, nintersects = NA,main.bar.color="blue",matrix.color="darkgreen",sets.bar.color="darkgrey",text.scale=1.5,order.by="freq",decreasing="TRUE",mainbar.y.label=paste(colnames(my.contrasts)[i],"\nlogFC>0,p<",padj,sep=""))
+    grid.edit('arrange',name='arrange2')
+    vp[[i*2-1]] = grid.grab()
+  }
+  # down-regulated genes
+  
+  InVen <- data.frame(temp[,i]<0&temp[,i+num]<padj,temp[,i+num*2]<0&temp[,i+num*3]<padj,temp[,i+num*4]<0&temp[,i+num*5]<padj)
+  colnames(InVen) <-c("Voom+Limma","limma","EdgeR")
+  for (j in 1:ncol(InVen)){InVen[,j]<-as.integer(InVen[,j])}
+  a<-apply(InVen,2,sum)
+  b<-table(a==0)["FALSE"];if(is.na(b)){b=0}
+  if(b==3){
+  upset(InVen, nsets = 4, nintersects = NA,main.bar.color="blue",matrix.color="darkgreen",sets.bar.color="darkgrey",text.scale=1.5,order.by="freq",decreasing="TRUE",mainbar.y.label=paste(colnames(my.contrasts)[i],"\nlogFC<0,p<",padj,sep=""))
+  grid.edit('arrange',name='arrange2')
+  vp[[i*2]]<-grid.grab()
+  }
+  if(b==2){
+    InVen<-InVen[,a!=0]
+    upset(InVen, nsets = 3, nintersects = NA,main.bar.color="blue",matrix.color="darkgreen",sets.bar.color="darkgrey",text.scale=1.5,order.by="freq",decreasing="TRUE",mainbar.y.label=paste(colnames(my.contrasts)[i],"\nlogFC>0,p<",padj,sep=""))
+    grid.edit('arrange',name='arrange2')
+    vp[[i*2-1]] = grid.grab()
+  }
+  print(i)
+}
+
+
+pdf(paste("9_Overlap_venn_limma_Voom_and_EdgR_bargraph.pdf", sep=""), height=14, width=12)
+for(i in c(1,3)){
+grid.arrange(vp[[i*2-1]],vp[[i*2]],vp[[i*2+1]],vp[[i*2+2]])
+}
+#grid.arrange(vp[[20]],vp[[22]])
+dev.off()
+
+##########################
+# Prepare files for GSEA #
+##########################
+# create rnk files 
+# for each contrast analysis
+
+dim(cpComp1)
+temp6<-cpComp1[,c(1,grep("^FDR_",colnames(cpComp1)),grep("logFC_",colnames(cpComp1)))]
+library(plyr)
+avg<-function(x){
+  return(mean(x[,2]))
+}
+
+temp7<-temp6[,1:(dim(my.contrasts)[2]+1)]
+# convert p-value to directional inversed p-value
+for (i in 2:(dim(my.contrasts)[2]+1)){
+  temp7[,i]<-log10(temp6[,i])*((temp6[,i+dim(my.contrasts)[2]]>0)*(-1)+(temp6[,i+dim(my.contrasts)[2]]<0))
+}
+
+for (i in 2:dim(temp7)[2]){
+  temp7<-temp7[temp7$gene!="",]
+  # remove duplicate by applying average
+  temp8<-ddply(temp7[,c(1,i)],.(gene),avg)
+  temp8<-temp8[order(-temp8$V1),]
+  dim(temp8)
+  temp8$gene<-toupper(temp8$gene)
+  fname<-gsub("FDR_","Signed_log10FDR_",colnames(temp6)[i],)
+  temp8<-temp8[complete.cases(temp8),]
+  write.table(temp8,file=paste(fname,"_voom.rnk",sep=""),col.names=FALSE,sep="\t",row.name=FALSE,quote=FALSE)
+}
+#######################
+dim(cpComp2)
+temp6<-cpComp2[,c(1,grep("^FDR_",colnames(cpComp2)),grep("logFC_",colnames(cpComp2)))]
+library(plyr)
+avg<-function(x){
+  return(mean(x[,2]))
+}
+
+temp7<-temp6[,1:(dim(my.contrasts)[2]+1)]
+# convert p-value to directional inversed p-value
+for (i in 2:(dim(my.contrasts)[2]+1)){
+  temp7[,i]<-log10(temp6[,i])*((temp6[,i+dim(my.contrasts)[2]]>0)*(-1)+(temp6[,i+dim(my.contrasts)[2]]<0))
+}
+
+for (i in 2:dim(temp7)[2]){
+  temp7<-temp7[temp7$gene!="",]
+  # remove duplicate by applying average
+  temp8<-ddply(temp7[,c(1,i)],.(gene),avg)
+  temp8<-temp8[order(-temp8$V1),]
+  dim(temp8)
+  temp8$gene<-toupper(temp8$gene)
+  fname<-gsub("FDR_","Signed_log10FDR_",colnames(temp6)[i],)
+  temp8<-temp8[complete.cases(temp8),]
+  write.table(temp8,file=paste(fname,"_limma.rnk",sep=""),col.names=FALSE,sep="\t",row.name=FALSE,quote=FALSE)
+}
+#######################
+dim(cpComp3)
+temp6<-cpComp3[,c(1,grep("FDR_",colnames(cpComp3)),grep("logFC_",colnames(cpComp3)))]
+library(plyr)
+avg<-function(x){
+  return(mean(x[,2]))
+}
+
+temp7<-temp6[,1:(dim(my.contrasts)[2]+1)]
+# convert p-value to directional inversed p-value
+for (i in 2:(dim(my.contrasts)[2]+1)){
+  temp7[,i]<-log10(temp6[,i])*((temp6[,i+dim(my.contrasts)[2]]>0)*(-1)+(temp6[,i+dim(my.contrasts)[2]]<0))
+}
+
+for (i in 2:dim(temp7)[2]){
+  temp7<-temp7[temp7$gene!="",]
+  # remove duplicate by applying average
+  temp8<-ddply(temp7[,c(1,i)],.(gene),avg)
+  temp8<-temp8[order(-temp8$V1),]
+  dim(temp8)
+  temp8$gene<-toupper(temp8$gene)
+  fname<-gsub("FDR_","Signed_log10FDR_",colnames(temp6)[i],)
+  temp8<-temp8[complete.cases(temp8),]
+  write.table(temp8,file=paste(fname,"_edgeR.rnk",sep=""),col.names=FALSE,sep="\t",row.name=FALSE,quote=FALSE)
+}
+
+
+
+
+
+
+
